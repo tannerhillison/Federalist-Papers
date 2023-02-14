@@ -1,0 +1,110 @@
+---
+title: "Predicting Authorship of Disputed Federalist Papers"
+author: "Tanner Hillison"
+date: "2022-10-9"
+output: html_document
+---
+
+Loading Data
+```{r}
+require(tidyverse)
+require(tidytext)
+corpus.tidy <- read_rds("/Users/tanner/Desktop/Data Science/Data/FederalistPaperCorpusTidy.Rds")
+```
+
+
+#Question 1
+Calculate the degree to which Madison or Hamilton use a given word by calculating the ratio of Hamilton's use to Madison's use. To do this, start by converting the data into a "bag of words" (BOW) structure using the `unnest_tokens()` function from the `tidytext` package. Make sure to remove any numbers! Then calculate the frequency that either Hamilton or Madison used each word, and finally calculate the ratio of Hamilton to Madison. Now remove any words that appear fewer than 20 times, and then plot the top-10 most Hamilton-specific words and the top-10 most Madison-specific words. Do you see any interesting patterns?
+```{r}
+tokens <- corpus.tidy %>%
+  unnest_tokens(output = word, input = text) %>%
+  mutate(word = str_replace_all(word, '\\d+', '')) %>%
+  filter(word != '')
+
+authorWords <- tokens %>%
+  count(author, word) %>%
+  filter(author %in% c('hamilton', 'madison')) %>%
+  spread(author, n, fill = 0) %>%
+  rowwise() %>%
+  mutate(ratio = hamilton/madison, total = sum(hamilton, madison))
+
+madison_words <- authorWords %>%
+  filter(total > 20 & (ratio > 5 | ratio < 1) & ratio != 'Inf') %>%
+  arrange(ratio)
+
+hamilton_words <- authorWords %>%
+  filter(total > 20 & (ratio > 5 | ratio < 1) & ratio != 'Inf') %>%
+  arrange(-ratio)
+
+madPlot <- madison_words %>%
+  ungroup() %>%
+  arrange(ratio) %>%
+  slice(1:10) %>%
+  ggplot(aes(x = ratio, y = reorder(word, ratio))) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'ratio', y = 'word', title = 'Top 10 Madison used words')
+
+madPlot
+
+hamPlot <- hamilton_words %>%
+  ungroup() %>%
+  arrange(-ratio) %>%
+  slice(1:10) %>%
+  ggplot(aes(x = ratio, y = reorder(word, ratio))) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'ratio', y = 'word', title = 'Top 10 Hamilton used words')
+
+hamPlot
+```
+It is difficult to see much of any pattern here. I am able to see which words each of the author's used the most, but I am not sure if they have any obvious similarities that can be easily categorized.
+
+
+#Question 2
+Now **wrangle** the data in order to run a regression in which you predict either Hamilton or Madison authorship as a function of the rate at which the top-5 most specific words for each author are used in each document. To do this, you first must create a document term matrix (DTM) and calculate the rate at which words are used (calculate the rate per 1,000 words for this step). Then you must spread the data so that you have a dataset you can use for regression analysis, in which each row is a document, and each column is a word, and the values are the rate at which that word is used in that document. Be careful to change the name of the `author` column to avoid replacing it with the rate at which the word `author` appears in the data! Also make sure to replace missing data (`NA`) with zeros! Finally, recode author so that the outcome is numeric, and is +1 if the author is Hamilton, and is -1 if the author is Madison, and is `NA` otherwise.
+```{r}
+dtm <- tokens %>%
+  count(author, document, word) %>%
+  group_by(document) %>%
+  mutate(totwords = sum(n)) %>%
+  ungroup() %>%
+  mutate(rate = n *1000/totwords)
+
+dat <- dtm %>%
+  select(-n, -totwords) %>%
+  rename(author_original = author) %>%
+  spread(word, rate, fill = 0)
+
+discrim_words <- authorWords %>%
+  filter(total > 20 & (ratio > 5 | ratio < 1))
+
+topHam <- discrim_words %>%
+  select(word, ratio) %>%
+  arrange(-ratio) %>%
+  filter(!is.infinite(ratio)) %>%
+  ungroup() %>%
+  slice(1:10)
+
+
+dat_forReg <- dat %>%
+  select(author_original, document, topHam$word)
+
+dat_forReg <- dat_forReg %>%
+  mutate(score = ifelse(author_original == 'hamilton', 1, ifelse(author_original == 'madison', -1, NA)))
+```
+
+
+#Question 3
+Finally, run the regression and use the model to predict authorship on the full data. Visualize the results by plotting the list of Federalist papers on the x-axis and the predicted authorship on the y-axis, coloring points by whether they were authored by Madison, Hamilton, or are contested papers. According to this analysis, who most likely authored the contested documents? EXTRA CREDIT: calculate the 100-fold cross validated RMSE with an 80-20 split, and then express your predictions about authorship in terms of lower and upper bounds. `set.seed(123)` for consistency.
+```{r}
+topHam$word
+
+form <- paste0('score ~ ', paste(topHam$word, collapse = '+'))
+summary(model_ham <- lm(form, dat_forReg))
+
+toplot <- dat_forReg %>%
+  mutate(predicted_author = predict(model_ham, newdata = dat_forReg))
+
+toplot %>%
+  filter(author_original %in% c('hamilton', 'madison', 'contested')) %>% ggplot(aes(x = document, y = predicted_author, color = author_original)) + geom_point(size = 2.5) + geom_hline(yintercept = 0, linetype = 'dashed') + labs(title = 'Predicted author of document', x = 'document', y = 'predicted author')
+```
+Based on the graph, Madison likely authored the contested articles.
